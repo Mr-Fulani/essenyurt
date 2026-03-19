@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  spec-compare:
+    build: .
+    image: spec-compare:latest
+    container_name: spec-compare
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - QT_QPA_PLATFORM=xcb
+    volumes:
+      # Папка для данных (Excel файлы)
+      - ./data:/app/data
+      # Папка для базы данных
+      - ./db:/app/db
+      # X11 socket для GUI (Linux/macOS)
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw
+    network_mode: host
+    stdin_open: true
+    tty: true
+    command: python src/main.py
+
+  # Сервис для сборки исполняемого файла
+  build-exe:
+    build: .
+    image: spec-compare:build
+    volumes:
+      - ./dist:/app/dist
+      - ./src:/app/src
+    command: >
+      bash -c "
+        pip install pyinstaller &&
+        cd /app/src &&
+        pyinstaller --onefile --windowed --name SpecCompare main.py &&
+        cp dist/SpecCompare /app/dist/
+      "
