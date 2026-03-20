@@ -18,20 +18,24 @@ class Database:
     def __init__(self, db_path: str = "specifications.db"):
         self.db_path = db_path
         self.conn = None
-        self.cursor = None
         self.init_database()
     
     def init_database(self):
         """Initialize database with required tables and indexes"""
-        self.conn = sqlite3.connect(self.db_path)
+        self.conn = sqlite3.connect(
+            self.db_path, 
+            check_same_thread=False,
+            detect_types=sqlite3.PARSE_DECLTYPES
+        )
         self.conn.row_factory = sqlite3.Row
-        self.cursor = self.conn.cursor()
+        
+        cursor = self.conn.cursor()
         
         # Enable FTS5
-        self.cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='files'")
+        cursor.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='files'")
         
         # Create files table
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 filename TEXT NOT NULL,
@@ -46,7 +50,7 @@ class Database:
         ''')
         
         # Create products table
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE TABLE IF NOT EXISTS products (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 file_id INTEGER NOT NULL,
@@ -63,24 +67,24 @@ class Database:
         ''')
         
         # Create indexes for fast search
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_weight ON files(total_weight)
         ''')
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_date ON files(upload_date)
         ''')
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_file_id ON products(file_id)
         ''')
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_manufacturer ON products(manufacturer)
         ''')
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_name ON products(name_clean)
         ''')
         
         # Create FTS5 virtual table for full-text search
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE VIRTUAL TABLE IF NOT EXISTS products_fts USING fts5(
                 name_clean,
                 manufacturer,
@@ -91,14 +95,14 @@ class Database:
         ''')
         
         # Triggers to keep FTS index in sync
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE TRIGGER IF NOT EXISTS products_ai AFTER INSERT ON products BEGIN
                 INSERT INTO products_fts(rowid, name_clean, manufacturer, brand)
                 VALUES (new.id, new.name_clean, new.manufacturer, new.brand);
             END
         ''')
         
-        self.cursor.execute('''
+        cursor.execute('''
             CREATE TRIGGER IF NOT EXISTS products_ad AFTER DELETE ON products BEGIN
                 INSERT INTO products_fts(products_fts, rowid, name_clean, manufacturer, brand)
                 VALUES ('delete', old.id, old.name_clean, old.manufacturer, old.brand);
@@ -114,8 +118,9 @@ class Database:
     
     def file_exists(self, file_hash: str) -> bool:
         """Check if file already exists in database"""
-        self.cursor.execute("SELECT id FROM files WHERE file_hash = ?", (file_hash,))
-        return self.cursor.fetchone() is not None
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT id FROM files WHERE file_hash = ?", (file_hash,))
+        return cursor.fetchone() is not None
     
     def add_file(self, filename: str, file_path: str, products_data: List[Dict]) -> int:
         """Add new file with its products to database"""
@@ -131,7 +136,8 @@ class Database:
         brands = list(set(p.get('brand', '') for p in products_data if p.get('brand')))
         
         # Insert file record
-        self.cursor.execute('''
+        cursor = self.conn.cursor()
+        cursor.execute('''
             INSERT INTO files (filename, file_hash, total_weight, total_items, manufacturers, brands, json_snapshot)
             VALUES (?, ?, ?, ?, ?, ?, ?)
         ''', (
@@ -144,11 +150,11 @@ class Database:
             json.dumps(products_data, ensure_ascii=False)
         ))
         
-        file_id = self.cursor.lastrowid
+        file_id = cursor.lastrowid
         
         # Insert products
         for product in products_data:
-            self.cursor.execute('''
+            cursor.execute('''
                 INSERT INTO products (file_id, name_clean, name_original, manufacturer, brand, weight_net, quantity, article)
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
@@ -178,16 +184,18 @@ class Database:
     
     def get_file(self, file_id: int) -> Optional[Dict]:
         """Get file by ID"""
-        self.cursor.execute("SELECT * FROM files WHERE id = ?", (file_id,))
-        row = self.cursor.fetchone()
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM files WHERE id = ?", (file_id,))
+        row = cursor.fetchone()
         if row:
             return dict(row)
         return None
     
     def get_file_products(self, file_id: int) -> List[Dict]:
         """Get all products for a file"""
-        self.cursor.execute("SELECT * FROM products WHERE file_id = ?", (file_id,))
-        return [dict(row) for row in self.cursor.fetchall()]
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT * FROM products WHERE file_id = ?", (file_id,))
+        return [dict(row) for row in cursor.fetchall()]
     
     def get_all_files(self, date_from: Optional[str] = None, 
                       date_to: Optional[str] = None,
@@ -208,16 +216,18 @@ class Database:
         if limit:
             query += f" LIMIT {limit}"
         
-        self.cursor.execute(query, params)
-        return [dict(row) for row in self.cursor.fetchall()]
+        cursor = self.conn.cursor()
+        cursor.execute(query, params)
+        return [dict(row) for row in cursor.fetchall()]
     
     def get_files_by_weight_range(self, min_weight: float, max_weight: float) -> List[Dict]:
         """Get files within weight range (for pre-filtering)"""
-        self.cursor.execute('''
+        cursor = self.conn.cursor()
+        cursor.execute('''
             SELECT * FROM files 
             WHERE total_weight BETWEEN ? AND ?
         ''', (min_weight, max_weight))
-        return [dict(row) for row in self.cursor.fetchall()]
+        return [dict(row) for row in cursor.fetchall()]
     
     def get_files_by_manufacturers(self, manufacturers: List[str]) -> List[Dict]:
         """Get files containing specific manufacturers"""
@@ -226,34 +236,37 @@ class Database:
         
         # Use FTS to find files with matching manufacturers
         placeholders = ','.join('?' * len(manufacturers))
-        self.cursor.execute(f'''
+        cursor = self.conn.cursor()
+        cursor.execute(f'''
             SELECT DISTINCT f.* FROM files f
             JOIN products p ON f.id = p.file_id
             WHERE p.manufacturer IN ({placeholders})
         ''', manufacturers)
-        return [dict(row) for row in self.cursor.fetchall()]
+        return [dict(row) for row in cursor.fetchall()]
     
     def search_similar_products(self, query: str, limit: int = 100) -> List[Dict]:
         """Search products using FTS5"""
-        self.cursor.execute('''
+        cursor = self.conn.cursor()
+        cursor.execute('''
             SELECT p.*, rank FROM products_fts
             JOIN products p ON products_fts.rowid = p.id
             WHERE products_fts MATCH ?
             ORDER BY rank
             LIMIT ?
         ''', (query, limit))
-        return [dict(row) for row in self.cursor.fetchall()]
+        return [dict(row) for row in cursor.fetchall()]
     
     def get_stats(self) -> Dict:
         """Get database statistics"""
-        self.cursor.execute("SELECT COUNT(*) as count FROM files")
-        file_count = self.cursor.fetchone()['count']
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT COUNT(*) as count FROM files")
+        file_count = cursor.fetchone()['count']
         
-        self.cursor.execute("SELECT COUNT(*) as count FROM products")
-        product_count = self.cursor.fetchone()['count']
+        cursor.execute("SELECT COUNT(*) as count FROM products")
+        product_count = cursor.fetchone()['count']
         
-        self.cursor.execute("SELECT SUM(total_weight) as total FROM files")
-        total_weight = self.cursor.fetchone()['total'] or 0
+        cursor.execute("SELECT SUM(total_weight) as total FROM files")
+        total_weight = cursor.fetchone()['total'] or 0
         
         return {
             'file_count': file_count,
@@ -263,7 +276,8 @@ class Database:
     
     def delete_file(self, file_id: int):
         """Delete file and its products"""
-        self.cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
+        cursor = self.conn.cursor()
+        cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
         self.conn.commit()
     
     def close(self):
