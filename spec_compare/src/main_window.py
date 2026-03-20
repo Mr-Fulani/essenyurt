@@ -264,8 +264,8 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         progress_layout.addWidget(self.progress_bar)
         
-        self.status_label = QLabel("")
-        self.status_label.setStyleSheet("color: #666;")
+        self.status_label = QLabel("Готов к работе")
+        self.status_label.setStyleSheet("font-style: italic;")
         progress_layout.addWidget(self.status_label)
         
         main_layout.addLayout(progress_layout)
@@ -276,7 +276,7 @@ class MainWindow(QMainWindow):
         summary_layout = QVBoxLayout(self.summary_group)
         self.summary_label = QLabel("")
         self.summary_label.setWordWrap(True)
-        self.summary_label.setStyleSheet("font-size: 13px; color: #333; line-height: 1.4;")
+        self.summary_label.setStyleSheet("font-size: 14px; font-weight: 500; line-height: 1.5; padding: 5px;")
         summary_layout.addWidget(self.summary_label)
         main_layout.addWidget(self.summary_group)
         
@@ -342,10 +342,10 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(results_group)
         
         # === Stats Bar ===
-        self.stats_label = QLabel("База данных: 0 файлов | 0 товаров")
-        self.stats_label.setStyleSheet("color: #666; font-size: 11px;")
-        self.stats_label.setAlignment(Qt.AlignmentFlag.AlignRight)
-        main_layout.addWidget(self.stats_label)
+        self.db_stats_label = QLabel("База данных: 0 файлов | 0 товаров")
+        self.db_stats_label.setStyleSheet("font-size: 11px;")
+        self.db_stats_label.setAlignment(Qt.AlignmentFlag.AlignRight)
+        main_layout.addWidget(self.db_stats_label)
         
         # === Menu Bar ===
         self.setup_menu()
