@@ -397,7 +397,7 @@ class MainWindow(QMainWindow):
     def load_stats(self):
         """Load and display database statistics"""
         stats = self.db.get_stats()
-        self.stats_label.setText(
+        self.db_stats_label.setText(
             f"📁 База данных: {stats['file_count']:,} файлов | "
             f"{stats['product_count']:,} товаров | "
             f"Общий вес: {stats['total_weight']:,.2f} кг"
