@@ -85,16 +85,19 @@ class ComparisonWorker(QThread):
             # Load products for each candidate
             self.status.emit("Загрузка данных кандидатов...")
             candidate_files = []
+            total_candidates = len(weight_candidates)
             for i, file_info in enumerate(weight_candidates):
+                self.status.emit(f"Загрузка кандидата {i+1} из {total_candidates}: {file_info['filename']}")
                 products = self.db.get_file_products(file_info['id'])
                 file_info['products'] = products
                 candidate_files.append(file_info)
                 
-                progress = 50 + int((i / len(weight_candidates)) * 30)
+                progress = 50 + int((i / total_candidates) * 30)
+                self.progress_bar_signal = progress # (Hypothetical, wait... using progress.emit below)
                 self.progress.emit(progress)
             
             # Compare
-            self.status.emit("Сравнение...")
+            self.status.emit(f"Сравнение с {total_candidates} файлами...")
             results = self.comparator.find_matches(
                 new_products, candidate_files, top_n=10
             )
@@ -266,6 +269,16 @@ class MainWindow(QMainWindow):
         progress_layout.addWidget(self.status_label)
         
         main_layout.addLayout(progress_layout)
+        
+        # === Summary Area ===
+        self.summary_group = QGroupBox("Итоги сравнения")
+        self.summary_group.setVisible(False)
+        summary_layout = QVBoxLayout(self.summary_group)
+        self.summary_label = QLabel("")
+        self.summary_label.setWordWrap(True)
+        self.summary_label.setStyleSheet("font-size: 13px; color: #333; line-height: 1.4;")
+        summary_layout.addWidget(self.summary_label)
+        main_layout.addWidget(self.summary_group)
         
         # === Results Table ===
         results_group = QGroupBox("Результаты сравнения")
@@ -460,16 +473,28 @@ class MainWindow(QMainWindow):
         self.compare_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         
-        # Feedback if no results
-        if not results:
-            QMessageBox.information(
-                self, "Сравнение завершено", 
-                "Совпадений не найдено. Файл будет добавлен в базу данных для будущих сравнений."
-            )
+        # Build summary text
+        filename = Path(self.current_file_path).name
+        best_match = results[0]['similarity']['total'] if results else 0
+        candidates_count = self.worker.limit or "все" if not self.worker.date_from else "отфильтрованные"
+        # We can actually pass the number of candidates from the worker, but for now:
+        db_stats = self.db.get_stats()
+        
+        summary_text = (
+            f"✅ <b>Файл проанализирован:</b> {filename}<br>"
+            f"📊 <b>Результат:</b> Поиск выполнен по {db_stats['file_count']} файлам в базе данных.<br>"
+        )
+        
+        if results:
+            summary_text += f"🔍 <b>Найдено совпадений:</b> {len(results)}. Максимальное сходство: <b>{best_match}%</b>."
+        else:
+            summary_text += "🔍 <b>Совпадений не найдено.</b> Текущий файл добавлен в базу для будущих сравнений."
+            
+        self.summary_label.setText(summary_text)
+        self.summary_group.setVisible(True)
         
         # Add file to database
         try:
-            filename = Path(self.current_file_path).name
             products = self.parser.parse_file(self.current_file_path)
             self.db.add_file(filename, self.current_file_path, products)
             self.load_stats()
