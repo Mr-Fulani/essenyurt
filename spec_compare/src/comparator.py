@@ -83,8 +83,8 @@ class SpecificationComparator:
         Compare product names using fuzzy matching + TF-IDF
         Returns similarity score 0-1
         """
-        new_names = [self._normalize_name(p.get('name', '')) for p in new_products]
-        archive_names = [self._normalize_name(p.get('name', '')) for p in archive_products]
+        new_names = [self._normalize_name(p.get('name', '') or p.get('name_original', '')) for p in new_products]
+        archive_names = [self._normalize_name(p.get('name', '') or p.get('name_original', '')) for p in archive_products]
         
         # Filter empty names
         new_names = [n for n in new_names if n]
