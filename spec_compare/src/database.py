@@ -17,18 +17,16 @@ class Database:
     
     def __init__(self, db_path: str = "specifications.db"):
         self.db_path = db_path
-        self.conn = None
-        self.init_database()
-    
-    def init_database(self):
-        """Initialize database with required tables and indexes"""
         self.conn = sqlite3.connect(
             self.db_path, 
             check_same_thread=False,
             detect_types=sqlite3.PARSE_DECLTYPES
         )
         self.conn.row_factory = sqlite3.Row
-        
+        self.init_database()
+    
+    def init_database(self):
+        """Initialize database with required tables and indexes"""
         cursor = self.conn.cursor()
         
         # Enable FTS5
@@ -151,6 +149,10 @@ class Database:
         ))
         
         file_id = cursor.lastrowid
+        if file_id is None:
+            raise ValueError("Failed to get lastrowid after inserting file")
+        
+        file_id = int(file_id)
         
         # Insert products
         for product in products_data:
@@ -205,10 +207,10 @@ class Database:
         params = []
         
         if date_from:
-            query += " AND upload_date >= ?"
+            query += " AND date(upload_date) >= ?"
             params.append(date_from)
         if date_to:
-            query += " AND upload_date <= ?"
+            query += " AND date(upload_date) <= ?"
             params.append(date_to)
         
         query += " ORDER BY upload_date DESC"

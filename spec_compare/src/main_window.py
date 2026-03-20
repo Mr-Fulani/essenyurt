@@ -460,6 +460,13 @@ class MainWindow(QMainWindow):
         self.compare_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         
+        # Feedback if no results
+        if not results:
+            QMessageBox.information(
+                self, "Сравнение завершено", 
+                "Совпадений не найдено. Файл будет добавлен в базу данных для будущих сравнений."
+            )
+        
         # Add file to database
         try:
             filename = Path(self.current_file_path).name
