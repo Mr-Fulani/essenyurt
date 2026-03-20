@@ -98,7 +98,12 @@ class SpecificationComparator:
         for new_name in new_names:
             best_score = 0
             for archive_name in archive_names:
-                score = fuzz.token_set_ratio(new_name, archive_name) / 100.0
+                # Character-by-character exact match check (100% match)
+                if new_name == archive_name:
+                    score = 1.0
+                else:
+                    score = fuzz.token_set_ratio(new_name, archive_name) / 100.0
+                
                 if score > best_score:
                     best_score = score
             match_scores.append(best_score)
@@ -218,15 +223,15 @@ class SpecificationComparator:
         archive_items = set()
         
         for p in new_products:
-            name = self._normalize_name(p.get('name', ''))
-            mfr = self._normalize_name(p.get('manufacturer', ''))
+            name = self._normalize_name(p.get('name', '') or p.get('name_original', ''))
+            mfr = self._normalize_name(p.get('manufacturer', '') or p.get('brand', ''))
             if name:
                 signature = f"{name}|{mfr}"
                 new_items.add(signature)
         
         for p in archive_products:
-            name = self._normalize_name(p.get('name', ''))
-            mfr = self._normalize_name(p.get('manufacturer', ''))
+            name = self._normalize_name(p.get('name', '') or p.get('name_original', ''))
+            mfr = self._normalize_name(p.get('manufacturer', '') or p.get('brand', ''))
             if name:
                 signature = f"{name}|{mfr}"
                 archive_items.add(signature)
@@ -344,8 +349,8 @@ class SpecificationComparator:
         """
         # Create signatures for matching
         def make_sig(p):
-            name = self._normalize_name(p.get('name', ''))
-            mfr = self._normalize_name(p.get('manufacturer', ''))
+            name = self._normalize_name(p.get('name', '') or p.get('name_original', ''))
+            mfr = self._normalize_name(p.get('manufacturer', '') or p.get('brand', ''))
             return (name, mfr)
         
         new_sigs = {make_sig(p): p for p in new_products}

@@ -196,7 +196,7 @@ class Database:
     def get_file_products(self, file_id: int) -> List[Dict]:
         """Get all products for a file"""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM products WHERE file_id = ?", (file_id,))
+        cursor.execute("SELECT *, name_original as name FROM products WHERE file_id = ?", (file_id,))
         return [dict(row) for row in cursor.fetchall()]
     
     def get_all_files(self, date_from: Optional[str] = None, 
@@ -250,7 +250,7 @@ class Database:
         """Search products using FTS5"""
         cursor = self.conn.cursor()
         cursor.execute('''
-            SELECT p.*, rank FROM products_fts
+            SELECT p.*, name_original as name, rank FROM products_fts
             JOIN products p ON products_fts.rowid = p.id
             WHERE products_fts MATCH ?
             ORDER BY rank
