@@ -7,7 +7,7 @@ import sys
 import os
 from pathlib import Path
 from datetime import datetime, timedelta
-from typing import Optional, List
+from typing import Optional, List, Dict
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -17,12 +17,16 @@ from PyQt6.QtWidgets import (
     QAbstractItemView, QMenu, QSystemTrayIcon, QStyle
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QDate, QMimeData, QSettings
-from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QAction, QFont
+from PyQt6.QtGui import QDragEnterEvent, QDropEvent, QIcon, QAction, QFont, QColor
 
 from database import Database
 from excel_parser import SpecificationParser
 from comparator import SpecificationComparator
 from excel_exporter import ResultsExporter
+from visual_compare_dialog import VisualCompareDialog
+from export_options_dialog import ExportOptionsDialog
+from detail_dialog import DetailDialog
+from database_viewer_dialog import DatabaseViewerDialog
 
 
 class ComparisonWorker(QThread):
@@ -30,7 +34,7 @@ class ComparisonWorker(QThread):
     
     progress = pyqtSignal(int)
     status = pyqtSignal(str)
-    finished_signal = pyqtSignal(list)
+    finished_signal = pyqtSignal(list, list)  # (results, new_products)
     error = pyqtSignal(str)
     
     def __init__(self, file_path: str, db: Database, 
@@ -65,7 +69,16 @@ class ComparisonWorker(QThread):
             self.status.emit("Поиск кандидатов в базе...")
             
             # Pre-filter by weight range (±30%)
-            total_weight = sum(p.get('weight_net', 0) or 0 for p in new_products)
+            def to_float(val):
+                try: return float(str(val).replace(',', '.').replace(' ', ''))
+                except: return 0.0
+            def guess(product, names):
+                for k, v in product.items():
+                    if isinstance(k, str) and k != 'row_number':
+                        if any(n in k.lower() for n in names): return v
+                return ''
+                
+            total_weight = sum(to_float(guess(p, ['вес', 'weight', 'нетто'])) for p in new_products)
             min_weight = total_weight * 0.7
             max_weight = total_weight * 1.3
             
@@ -98,13 +111,30 @@ class ComparisonWorker(QThread):
             
             # Compare
             self.status.emit(f"Сравнение с {total_candidates} файлами...")
-            results = self.comparator.find_matches(
-                new_products, candidate_files, top_n=10
-            )
+            
+            new_file_hash = self.db.compute_file_hash(self.file_path)
+            
+            results = []
+            for candidate in candidate_files:
+                if candidate.get('file_hash') == new_file_hash:
+                    sim = {'content': 100.0, 'columns': 100.0, 'total': 100.0}
+                else:
+                    archive_products = candidate.get('products', [])
+                    sim = self.comparator.compare(new_products, archive_products)
+                
+                res = dict(candidate)
+                res['similarity'] = sim
+                results.append(res)
+                
+            # Сортировка по убыванию общей схожести
+            results.sort(key=lambda x: x['similarity']['total'], reverse=True)
+            
+            # Оставляем только топ-5
+            results = results[:5]
             
             self.progress.emit(100)
             self.status.emit("Готово!")
-            self.finished_signal.emit(results)
+            self.finished_signal.emit(results, new_products)
             
         except Exception as e:
             self.error.emit(str(e))
@@ -285,12 +315,11 @@ class MainWindow(QMainWindow):
         results_layout = QVBoxLayout(results_group)
         
         self.results_table = QTableWidget()
-        self.results_table.setColumnCount(9)
+        self.results_table.setColumnCount(7)
         self.results_table.setHorizontalHeaderLabels([
-            "Место", "Файл", "Дата", "Схожесть", "Товары", 
-            "Производители", "Вес", "Позиций", "Вес нетто"
+            "ID", "Дата", "Файл", "Сходство", "Стоимость", "Общий вес", "Позиций"
         ])
-        self.results_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.results_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch) # File column
         self.results_table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.results_table.setAlternatingRowColors(True)
         self.results_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
@@ -300,14 +329,15 @@ class MainWindow(QMainWindow):
         # Action buttons
         btn_layout = QHBoxLayout()
         
-        self.export_btn = QPushButton("📥 Экспорт в Excel")
+        self.export_btn = QPushButton("📥 Отчет сравнения")
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self.export_results)
+        self.export_btn.setToolTip("Экспорт подробного отчета о сравнении двух спецификаций")
         self.export_btn.setStyleSheet("""
             QPushButton {
                 background-color: #4CAF50;
                 color: white;
-                padding: 10px 20px;
+                padding: 10px 15px;
                 font-weight: bold;
                 border-radius: 5px;
             }
@@ -316,10 +346,28 @@ class MainWindow(QMainWindow):
         """)
         btn_layout.addWidget(self.export_btn)
         
-        self.detail_btn = QPushButton("📋 Детальное сравнение")
+        self.visual_btn = QPushButton("👁 Визуальный анализ")
+        self.visual_btn.setEnabled(False)
+        self.visual_btn.clicked.connect(self.visual_compare)
+        self.visual_btn.setToolTip("Визуальное сравнение товаров бок о бок")
+        btn_layout.addWidget(self.visual_btn)
+
+        self.download_source_btn = QPushButton("💾 Скачать оригинал")
+        self.download_source_btn.setEnabled(False)
+        self.download_source_btn.clicked.connect(self.export_source_with_options)
+        self.download_source_btn.setToolTip("Скачать исходный файл из базы с возможностью обработки")
+        btn_layout.addWidget(self.download_source_btn)
+        
+        self.detail_btn = QPushButton("📋 Детали совпадения")
         self.detail_btn.setEnabled(False)
         self.detail_btn.clicked.connect(self.show_details)
         btn_layout.addWidget(self.detail_btn)
+        
+        # Add database manager button for easy access
+        self.db_manager_btn = QPushButton("🗄 Управление БД")
+        self.db_manager_btn.clicked.connect(self.show_database_viewer)
+        self.db_manager_btn.setToolTip("Открыть менеджер всех сохраненных спецификаций")
+        btn_layout.addWidget(self.db_manager_btn)
         
         btn_layout.addStretch()
         
@@ -378,6 +426,11 @@ class MainWindow(QMainWindow):
         
         # Database menu
         db_menu = menubar.addMenu("База данных")
+        
+        db_manager_action = QAction("Управление базой данных...", self)
+        db_manager_action.setShortcut("Ctrl+M")
+        db_manager_action.triggered.connect(self.show_database_viewer)
+        db_menu.addAction(db_manager_action)
         
         import_action = QAction("Импорт файла в базу...", self)
         import_action.triggered.connect(self.import_file)
@@ -464,20 +517,24 @@ class MainWindow(QMainWindow):
         """Update status label"""
         self.status_label.setText(message)
     
-    def on_comparison_finished(self, results: List):
-        """Handle comparison completion"""
+    def on_comparison_finished(self, results: List, new_products: List):
+        """Обработка завершения сравнения"""
         self.comparison_results = results
-        self.display_results(results)
+        self.current_new_products = new_products # Сохраняем продукты
+        self.display_results(results, new_products)
         self.export_btn.setEnabled(True)
+        self.visual_btn.setEnabled(True)
         self.detail_btn.setEnabled(True)
+        self.download_source_btn.setEnabled(True)
         self.compare_btn.setEnabled(True)
         self.progress_bar.setVisible(False)
         
-        # Build summary text
+        # Построение итогового текста
         filename = Path(self.current_file_path).name
-        best_match = results[0]['similarity']['total'] if results else 0
-        candidates_count = self.worker.limit or "все" if not self.worker.date_from else "отфильтрованные"
-        # We can actually pass the number of candidates from the worker, but for now:
+        
+        # Расчет суммы для нового файла
+        new_total_amount = sum(p.get('total_price', 0) or 0 for p in new_products)
+        
         db_stats = self.db.get_stats()
         
         summary_text = (
@@ -486,23 +543,51 @@ class MainWindow(QMainWindow):
         )
         
         if results:
-            summary_text += f"🔍 <b>Найдено совпадений:</b> {len(results)}. Максимальное сходство: <b>{best_match}%</b>."
+            best_match = results[0]
+            best_similarity = best_match['similarity']['total']
+            best_filename = best_match['filename']
+            best_total_amount = best_match.get('total_amount', 0)
+            
+            price_diff = best_total_amount - new_total_amount
+            diff_sign = "+" if price_diff > 0 else ""
+            
+            summary_text += (
+                f"🔍 <b>Найдено совпадений:</b> {len(results)}. Максимальное сходство: <b>{best_similarity}%</b>.<br>"
+                f"<b>Лучшее совпадение:</b> {best_filename}<br>"
+                f"<b>Разница в цене:</b> {diff_sign}{price_diff:,.2f} руб."
+            )
         else:
-            summary_text += "🔍 <b>Совпадений не найдено.</b> Текущий файл добавлен в базу для будущих сравнений."
+            summary_text += "🔍 <b>Совпадений не найдено.</b>"
             
         self.summary_label.setText(summary_text)
         self.summary_group.setVisible(True)
         
-        # Add file to database
+        # Добавление файла в базу данных с проверкой дубликатов
+        self.check_and_add_to_db(filename, new_products)
+
+    def check_and_add_to_db(self, filename: str, products: List[Dict]):
+        """Проверка на дубликаты и добавление в базу"""
+        file_hash = self.db.compute_file_hash(self.current_file_path)
+        
+        if self.db.file_exists(file_hash):
+            reply = QMessageBox.question(
+                self, "Дубликат найден",
+                f"Файл '{filename}' уже существует в базе данных (идентичный контент).\n"
+                "Вы хотите добавить его повторно как дубликат?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
+            )
+            
+            if reply == QMessageBox.StandardButton.No:
+                self.update_status("Добавление в базу отменено пользователем")
+                return
+
         try:
-            products = self.parser.parse_file(self.current_file_path)
             self.db.add_file(filename, self.current_file_path, products)
             self.load_stats()
-        except ValueError as e:
-            # File already exists, ignore
-            pass
+            self.update_status("Файл успешно добавлен в базу данных")
         except Exception as e:
-            print(f"Error adding file to DB: {e}")
+            QMessageBox.warning(self, "Ошибка сохранения", f"Не удалось сохранить файл в базу: {e}")
     
     def on_comparison_error(self, error: str):
         """Handle comparison error"""
@@ -511,42 +596,91 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self.status_label.setText("")
     
-    def display_results(self, results: List):
-        """Display results in table"""
-        self.results_table.setRowCount(len(results))
+    def display_results(self, matches: List, new_products: List):
+        """Display matches in table"""
+        self.results_table.setRowCount(0)
+        self.results_table.setRowCount(len(matches))
         
-        for i, result in enumerate(results):
-            sim = result['similarity']
+        def to_float(val):
+            try: return float(str(val).replace(',', '.').replace(' ', ''))
+            except: return 0.0
             
-            # Color based on similarity
-            total_sim = sim['total']
+        def guess(product, names):
+            for k, v in product.items():
+                if isinstance(k, str) and k != 'row_number':
+                    if any(n in k.lower() for n in names): return v
+            return ''
+
+        # Calculate heuristics totals for the new file
+        new_total_weight = sum(to_float(guess(p, ['вес', 'weight', 'нетто'])) for p in new_products)
+        new_total_amount = sum(to_float(guess(p, ['стоимо', 'сумма', 'итог', 'цена'])) for p in new_products)
+        
+        for i, m in enumerate(matches):
+            # 1. ID
+            id_item = QTableWidgetItem(str(m.get('file_id', '')))
+            
+            # 2. Date
+            date_val = m.get('upload_date', '')
+            if isinstance(date_val, str) and ' ' in date_val:
+                date_val = date_val.split(' ')[0]
+            date_item = QTableWidgetItem(str(date_val))
+            
+            # 3. Filename
+            file_item = QTableWidgetItem(m.get('filename', ''))
+            
+            # 4. Similarity
+            sim = m['similarity']['total']
+            sim_item = QTableWidgetItem(f"{sim}%")
+            
+            # 5. Price
+            price_val = m.get('total_amount', 0)
+            price_diff = price_val - new_total_amount
+            price_str = f"{price_val:,.2f}"
+            if abs(price_diff) > 0.01:
+                diff_sign = "+" if price_diff > 0 else ""
+                price_str += f" ({diff_sign}{price_diff:,.2f})"
+            price_item = QTableWidgetItem(price_str)
+            
+            # 6. Weight
+            weight_val = m.get('total_weight', 0)
+            weight_diff = weight_val - new_total_weight
+            weight_str = f"{weight_val:,.2f} кг"
+            if abs(weight_diff) > 0.01:
+                diff_sign = "+" if weight_diff > 0 else ""
+                if abs(weight_diff) >= 1000:
+                    weight_str += f" ({diff_sign}{weight_diff/1000:,.2f} т)"
+                else:
+                    weight_str += f" ({diff_sign}{weight_diff:,.2f} кг)"
+            weight_item = QTableWidgetItem(weight_str)
+            
+            # 7. Items
+            items_item = QTableWidgetItem(str(m.get('total_items', 0)))
+            
+            # Add to table
+            self.results_table.setItem(i, 0, id_item)
+            self.results_table.setItem(i, 1, date_item)
+            self.results_table.setItem(i, 2, file_item)
+            self.results_table.setItem(i, 3, sim_item)
+            self.results_table.setItem(i, 4, price_item)
+            self.results_table.setItem(i, 5, weight_item)
+            self.results_table.setItem(i, 6, items_item)
+            
+            # Color coding for similarity with high contrast text
+            total_sim = m['similarity']['total']
+            color = None
             if total_sim >= 80:
-                color = "#C6EFCE"  # Green
+                color = QColor(200, 255, 200) # Soft green
             elif total_sim >= 50:
-                color = "#FFEB9C"  # Yellow
+                color = QColor(255, 255, 200) # Soft yellow
             else:
-                color = "#FFC7CE"  # Red
-            
-            items = [
-                (i + 1, None),  # Место
-                (result['filename'], None),  # Файл
-                (result.get('upload_date', ''), None),  # Дата
-                (f"{sim['total']}%", color),  # Схожесть
-                (f"{sim['names']}%", None),  # Товары
-                (f"{sim['manufacturers']}%", None),  # Производители
-                (f"{sim['weight']}%", None),  # Вес
-                (result.get('total_items', 0), None),  # Позиций
-                (f"{result.get('total_weight', 0):.2f}", None),  # Вес нетто
-            ]
-            
-            for col, (value, bg_color) in enumerate(items):
-                item = QTableWidgetItem(str(value))
-                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-                if bg_color:
-                    item.setBackground(Qt.GlobalColor.green if total_sim >= 80 
-                                      else Qt.GlobalColor.yellow if total_sim >= 50 
-                                      else Qt.GlobalColor.red)
-                self.results_table.setItem(i, col, item)
+                color = QColor(255, 200, 200) # Soft red
+                
+            if color:
+                for col in range(7):
+                    cell = self.results_table.item(i, col)
+                    if cell:
+                        cell.setBackground(color)
+                        cell.setForeground(QColor(0, 0, 0)) # Forced black text for readability
         
         self.results_table.resizeColumnsToContents()
     
@@ -577,8 +711,40 @@ class MainWindow(QMainWindow):
                     f"Ошибка при экспорте:\n{str(e)}"
                 )
     
+    def visual_compare(self):
+        """Запуск окна визуального сравнения"""
+        current_row = self.results_table.currentRow()
+        if current_row < 0:
+            QMessageBox.information(self, "Информация", "Выберите файл из списка для визуального анализа")
+            return
+            
+        result = self.comparison_results[current_row]
+        
+        from visual_compare_dialog import VisualCompareDialog
+        dialog = VisualCompareDialog(
+            new_products=self.current_new_products,
+            archive_products=result.get('products', []), # Worker stores products in results
+            archive_filename=result.get('filename', 'Archive'),
+            parent=self
+        )
+        dialog.exec()
+
+    def export_source_with_options(self):
+        """Экспорт оригинального файла с опциями обработки"""
+        current_row = self.results_table.currentRow()
+        if current_row < 0:
+            QMessageBox.information(self, "Информация", "Выберите файл из списка для скачивания")
+            return
+            
+        result = self.comparison_results[current_row]
+        file_id = result.get('file_id')
+        
+        from export_options_dialog import ExportOptionsDialog
+        dialog = ExportOptionsDialog(file_id, self.db, self)
+        dialog.exec()
+
     def show_details(self):
-        """Show detailed comparison for selected row"""
+        """Показать детали записи в БД"""
         current_row = self.results_table.currentRow()
         if current_row < 0 or current_row >= len(self.comparison_results):
             QMessageBox.information(self, "Информация", "Выберите строку для просмотра деталей")
@@ -586,7 +752,7 @@ class MainWindow(QMainWindow):
         
         result = self.comparison_results[current_row]
         
-        # Create detail dialog
+        # Создание диалога деталей
         from detail_dialog import DetailDialog
         dialog = DetailDialog(result, self)
         dialog.exec()
@@ -649,6 +815,11 @@ class MainWindow(QMainWindow):
             except Exception as e:
                 QMessageBox.critical(self, "Ошибка", str(e))
     
+    def show_database_viewer(self):
+        """Show database manager dialog"""
+        dialog = DatabaseViewerDialog(self.db, self)
+        dialog.exec()
+        
     def show_stats(self):
         """Show database statistics"""
         stats = self.db.get_stats()

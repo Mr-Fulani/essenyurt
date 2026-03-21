@@ -41,9 +41,11 @@ class Database:
                 upload_date TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 total_weight REAL DEFAULT 0,
                 total_items INTEGER DEFAULT 0,
+                total_amount REAL DEFAULT 0, -- New column
                 manufacturers TEXT,  -- JSON array
                 brands TEXT,  -- JSON array
-                json_snapshot TEXT  -- Full data as JSON
+                json_snapshot TEXT,  -- Full data as JSON
+                file_content BLOB    -- Original file content
             )
         ''')
         
@@ -59,10 +61,43 @@ class Database:
                 weight_net REAL DEFAULT 0,
                 quantity INTEGER DEFAULT 0,
                 article TEXT,
-                similarity_vector TEXT,  -- Precomputed vector for fast comparison
+                unit_price REAL DEFAULT 0, -- New column
+                total_price REAL DEFAULT 0, -- New column
+                similarity_vector BLOB,  -- Changed from TEXT to BLOB
                 FOREIGN KEY (file_id) REFERENCES files(id) ON DELETE CASCADE
             )
         ''')
+        
+        # Migration: Add price columns if they don't exist
+        try:
+            cursor.execute("ALTER TABLE files ADD COLUMN total_amount REAL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # Already exists
+            
+        try:
+            cursor.execute("ALTER TABLE products ADD COLUMN unit_price REAL DEFAULT 0")
+            cursor.execute("ALTER TABLE products ADD COLUMN total_price REAL DEFAULT 0")
+        except sqlite3.OperationalError:
+            pass  # Already exists
+
+        try:
+            cursor.execute("ALTER TABLE files ADD COLUMN file_content BLOB")
+        except sqlite3.OperationalError:
+            pass  # Already exists
+
+        # Migration: Change similarity_vector to BLOB if it's TEXT
+        # This is more complex as SQLite doesn't allow direct column type alteration if data exists.
+        # For simplicity, we'll assume new databases will have BLOB and existing ones might need manual migration
+        # or a more robust ALTER TABLE approach (e.g., rename, create new, copy, drop old).
+        # For now, we'll just ensure the CREATE TABLE uses BLOB.
+        # If an existing DB has TEXT, it will continue to use TEXT unless manually migrated.
+        # A proper migration would involve:
+        # ALTER TABLE products RENAME TO products_old;
+        # CREATE TABLE products (... similarity_vector BLOB ...);
+        # INSERT INTO products SELECT ... CAST(similarity_vector AS BLOB) ... FROM products_old;
+        # DROP TABLE products_old;
+        # For this change, we'll rely on the CREATE TABLE IF NOT EXISTS to define BLOB for new DBs.
+        # Existing DBs will keep TEXT for similarity_vector unless manually handled.
         
         # Create indexes for fast search
         cursor.execute('''
@@ -114,6 +149,15 @@ class Database:
         with open(file_path, 'rb') as f:
             return hashlib.md5(f.read()).hexdigest()
     
+    def _guess_column(self, product: Dict, names_to_check: List[str]) -> any:
+        """Попытка найти значение по примерным названиям колонок"""
+        for k, v in product.items():
+            if isinstance(k, str) and k != 'row_number':
+                k_lower = k.lower()
+                if any(name in k_lower for name in names_to_check):
+                    return v
+        return ''
+
     def file_exists(self, file_hash: str) -> bool:
         """Check if file already exists in database"""
         cursor = self.conn.cursor()
@@ -121,31 +165,42 @@ class Database:
         return cursor.fetchone() is not None
     
     def add_file(self, filename: str, file_path: str, products_data: List[Dict]) -> int:
-        """Add new file with its products to database"""
-        file_hash = self.compute_file_hash(file_path)
+        """Add new file with its generic products to database"""
+        original_hash = self.compute_file_hash(file_path)
+        file_hash = original_hash
         
-        if self.file_exists(file_hash):
-            raise ValueError(f"File '{filename}' already exists in database (duplicate)")
+        counter = 1
+        while self.file_exists(file_hash):
+            file_hash = f"{original_hash}_{counter}"
+            counter += 1
         
-        # Calculate totals
-        total_weight = sum(p.get('weight_net', 0) or 0 for p in products_data)
+        # Read file content for storage
+        with open(file_path, 'rb') as f:
+            file_content = f.read()
+            
+        # Улучшенный сбор итогов через эвристику
+        def to_float(val):
+            try: return float(str(val).replace(',', '.').replace(' ', ''))
+            except: return 0.0
+
+        total_weight = sum(to_float(self._guess_column(p, ['вес', 'weight', 'нетто'])) for p in products_data)
         total_items = len(products_data)
-        manufacturers = list(set(p.get('manufacturer', '') for p in products_data if p.get('manufacturer')))
-        brands = list(set(p.get('brand', '') for p in products_data if p.get('brand')))
+        total_amount = sum(to_float(self._guess_column(p, ['стоимо', 'сумма', 'итог', 'total', 'цена'])) for p in products_data)
+        
+        manufacturers = list(set(str(self._guess_column(p, ['производит', 'изготовит', 'manufacturer'])) for p in products_data if self._guess_column(p, ['производит', 'изготовит', 'manufacturer'])))
+        brands = list(set(str(self._guess_column(p, ['бренд', 'марка', 'brand'])) for p in products_data if self._guess_column(p, ['бренд', 'марка', 'brand'])))
         
         # Insert file record
         cursor = self.conn.cursor()
         cursor.execute('''
-            INSERT INTO files (filename, file_hash, total_weight, total_items, manufacturers, brands, json_snapshot)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO files (filename, file_hash, total_weight, total_items, total_amount, manufacturers, brands, json_snapshot, file_content)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         ''', (
-            filename,
-            file_hash,
-            total_weight,
-            total_items,
+            filename, file_hash, total_weight, total_items, total_amount,
             json.dumps(manufacturers, ensure_ascii=False),
             json.dumps(brands, ensure_ascii=False),
-            json.dumps(products_data, ensure_ascii=False)
+            json.dumps(products_data, ensure_ascii=False, default=str),
+            file_content
         ))
         
         file_id = cursor.lastrowid
@@ -154,20 +209,22 @@ class Database:
         
         file_id = int(file_id)
         
-        # Insert products
+        # Insert heuristic products for search index
         for product in products_data:
+            name = str(self._guess_column(product, ['наименов', 'название', 'описание', 'name', 'товар']))
+            mfr = str(self._guess_column(product, ['производит', 'изготовит']))
+            brand = str(self._guess_column(product, ['бренд', 'марка']))
+            weight = to_float(self._guess_column(product, ['вес', 'weight']))
+            qty = to_float(self._guess_column(product, ['кол', 'qty']))
+            u_price = to_float(self._guess_column(product, ['цена за', 'ед']))
+            t_price = to_float(self._guess_column(product, ['стоимо', 'сумма']))
+            article = str(self._guess_column(product, ['артикул', 'код', 'part']))
+            
             cursor.execute('''
-                INSERT INTO products (file_id, name_clean, name_original, manufacturer, brand, weight_net, quantity, article)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO products (file_id, name_clean, name_original, manufacturer, brand, weight_net, quantity, article, unit_price, total_price)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ''', (
-                file_id,
-                self._clean_name(product.get('name', '')),
-                product.get('name', ''),
-                product.get('manufacturer', ''),
-                product.get('brand', ''),
-                product.get('weight_net', 0) or 0,
-                product.get('quantity', 0) or 0,
-                product.get('article', '')
+                file_id, self._clean_name(name), name, mfr, brand, weight, qty, article, u_price, t_price
             ))
         
         self.conn.commit()
@@ -177,27 +234,51 @@ class Database:
         """Clean product name for better matching"""
         if not name:
             return ''
-        # Uppercase and remove extra spaces
         name = ' '.join(name.upper().split())
-        # Remove common filler words
         fillers = ['THE', 'AND', 'OR', 'WITH', 'FOR', 'OF', 'IN', 'ON', 'AT', 'TO']
         words = [w for w in name.split() if w not in fillers]
         return ' '.join(words)
     
     def get_file(self, file_id: int) -> Optional[Dict]:
-        """Get file by ID"""
+        """Get file by ID (excluding BLOB content for performance)"""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT * FROM files WHERE id = ?", (file_id,))
+        cursor.execute("SELECT id, filename, file_hash, upload_date, total_weight, total_items, total_amount, manufacturers, brands, json_snapshot FROM files WHERE id = ?", (file_id,))
         row = cursor.fetchone()
         if row:
             return dict(row)
         return None
+
+    def delete_file(self, file_id: int) -> bool:
+        """Delete file and its associated products from the database"""
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("DELETE FROM products WHERE file_id = ?", (file_id,))
+            cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
+            self.conn.commit()
+            return True
+        except Exception as e:
+            import logging
+            logging.error(f"Error deleting file {file_id}: {e}")
+            self.conn.rollback()
+            return False
+
+    def get_file_content(self, file_id: int) -> Optional[Tuple[str, bytes]]:
+        """Get filename and raw content for download"""
+        cursor = self.conn.cursor()
+        cursor.execute("SELECT filename, file_content FROM files WHERE id = ?", (file_id,))
+        row = cursor.fetchone()
+        if row:
+            return row['filename'], row['file_content']
+        return None
     
     def get_file_products(self, file_id: int) -> List[Dict]:
-        """Get all products for a file"""
+        """Get all products generic data for a file"""
         cursor = self.conn.cursor()
-        cursor.execute("SELECT *, name_original as name FROM products WHERE file_id = ?", (file_id,))
-        return [dict(row) for row in cursor.fetchall()]
+        cursor.execute("SELECT json_snapshot FROM files WHERE id = ?", (file_id,))
+        row = cursor.fetchone()
+        if row and row['json_snapshot']:
+            return json.loads(row['json_snapshot'])
+        return []
     
     def get_all_files(self, date_from: Optional[str] = None, 
                       date_to: Optional[str] = None,
@@ -276,11 +357,6 @@ class Database:
             'total_weight': total_weight
         }
     
-    def delete_file(self, file_id: int):
-        """Delete file and its products"""
-        cursor = self.conn.cursor()
-        cursor.execute("DELETE FROM files WHERE id = ?", (file_id,))
-        self.conn.commit()
     
     def close(self):
         """Close database connection"""
