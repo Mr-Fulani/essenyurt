@@ -1,27 +1,66 @@
 @echo off
-chcp 65001 >nul
-echo ============================================
-echo SpecCompare: Запуск программы на Windows
-echo ============================================
+setlocal
+cd /d "%~dp0"
+
+if not exist "src\main.py" (
+    echo.
+    echo ERROR: src\main.py not found. Place this BAT next to the src folder.
+    echo.
+    pause
+    exit /b 1
+)
+
+echo ========================================================
+echo   SpecCompare - build Windows EXE
+echo ========================================================
+echo.
+
+echo [1/3] Checking Python...
+set "PY_CMD="
+
+py --version >nul 2>&1
+if not errorlevel 1 set "PY_CMD=py"
+
+if defined PY_CMD goto py_found
 
 python --version >nul 2>&1
-if %errorlevel% neq 0 (
-    echo [ОШИБКА] Python не установлен или не добавлен в PATH.
-    echo Пожалуйста, установите Python с сайта python.org и отметьте галочку "Add Python to PATH" во время установки.
+if not errorlevel 1 set "PY_CMD=python"
+
+:py_found
+if not defined PY_CMD (
+    echo.
+    echo ERROR: Python not found. Install from https://www.python.org/downloads/
+    echo and enable "Add python.exe to PATH" during setup.
+    echo.
     pause
-    exit /b
+    exit /b 1
 )
 
-if not exist ".venv" (
-    echo [ИНФО] Инициализация первого запуска... (создаю виртуальное окружение)
-    python -m venv .venv
+echo [OK] Using: %PY_CMD%
+
+echo [2/3] Installing dependencies...
+%PY_CMD% -m pip install --upgrade pip
+%PY_CMD% -m pip install -r requirements.txt pyinstaller
+if errorlevel 1 (
+    echo.
+    echo ERROR: pip install failed.
+    pause
+    exit /b 1
 )
 
-echo [ИНФО] Активация и установка зависимостей...
-call .venv\Scripts\activate.bat
-pip install -r requirements.txt >nul
+echo.
+echo [3/3] Running PyInstaller - this may take several minutes...
+%PY_CMD% -m PyInstaller --onefile --windowed --name SpecCompare --paths src --collect-all rapidfuzz src\main.py
 
-echo [ИНФО] Запускаю приложение...
-python src\main.py
+if errorlevel 1 (
+    echo.
+    echo ERROR: PyInstaller failed.
+    pause
+    exit /b 1
+)
 
+echo.
+echo ========================================================
+echo   DONE. Open dist\SpecCompare.exe
+echo ========================================================
 pause

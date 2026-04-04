@@ -1,0 +1,21 @@
+SpecCompare — сборка EXE на Windows
+
+ВАЖНО: run_windows.bat сохранён только латиницей (ASCII), чтобы cmd.exe не ломал
+команды из-за UTF-8. Сообщения в окне — на английском.
+
+1. Установите Python 3.11+ с https://www.python.org/downloads/
+   Включите «Add python.exe to PATH».
+
+2. Распакуйте папку (рядом должны быть run_windows.bat, requirements.txt, src).
+
+3. Откройте cmd, перейдите в папку:
+     cd путь\к\SpecCompare-Windows
+
+4. Запустите:
+     run_windows.bat
+
+5. Готовый файл:
+     dist\SpecCompare.exe
+
+---
+English: run run_windows.bat from cmd in this folder; output is in English by design.

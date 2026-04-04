@@ -1,15 +1,27 @@
-"""
-Specification Comparison Tool - Entry Point
-Точка входа в приложение сравнения спецификаций
-"""
-
 import sys
 import os
 
-# Add src directory to path
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# Добавляем папку src в пути поиска модулей, чтобы программа видела свои части
+src_dir = os.path.dirname(os.path.abspath(__file__))
+if src_dir not in sys.path:
+    sys.path.append(src_dir)
 
-from main_window import main
+# Фикс для PyInstaller (пути внутри временной папки EXE)
+if getattr(sys, 'frozen', False):
+    bundle_dir = sys._MEIPASS
+    if bundle_dir not in sys.path:
+        sys.path.append(bundle_dir)
+    os.chdir(bundle_dir)
+
+from PyQt6.QtWidgets import QApplication
+# Теперь импорт точно сработает:
+from main_window import MainWindow
+
+def main():
+    app = QApplication(sys.argv)
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
 
 if __name__ == "__main__":
     main()
